@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Double Pendulum — Week 05</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #1a1a24;
+    overflow: hidden;
+    font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  }
+  canvas { display: block; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+
+  .panel {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    color: #8888aa;
+    font-size: 13px;
+    line-height: 1.8;
+    pointer-events: none;
+    user-select: none;
+  }
+  .panel .title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #aab4ff;
+    margin-bottom: 6px;
+    letter-spacing: 1px;
+  }
+  .panel .row { display: flex; gap: 6px; }
+  .panel .label { color: #666680; }
+  .panel .val { color: #aab4ff; font-variant-numeric: tabular-nums; }
+
+  .controls {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .controls label {
+    color: #666680;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .controls .slider-val {
+    color: #aab4ff;
+    font-size: 11px;
+    min-width: 42px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .controls input[type=range] {
+    width: 90px;
+    accent-color: #6670ff;
+  }
+  .controls button {
+    background: #252536;
+    color: #aab4ff;
+    border: 1px solid #3a3a55;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .controls button:hover { background: #30304a; }
+
+  .hint {
+    position: fixed;
+    bottom: 62px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #4a4a66;
+    font-size: 11px;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<div class="panel">
+  <div class="title">DOUBLE PENDULUM</div>
+  <div class="row"><span class="label">θ₁:</span><span class="val" id="dispT1">90.0°</span></div>
+  <div class="row"><span class="label">θ₂:</span><span class="val" id="dispT2">90.0°</span></div>
+  <div class="row"><span class="label">ω₁:</span><span class="val" id="dispW1">0.00 rad/s</span></div>
+  <div class="row"><span class="label">ω₂:</span><span class="val" id="dispW2">0.00 rad/s</span></div>
+  <div class="row"><span class="label">Student:</span><span class="val">王永鸿 7902126177</span></div>
+</div>
+
+<div class="hint">拖拽摆球可改变初始角度</div>
+
+<div class="controls">
+  <label>摆长₁ <input type="range" id="sliderL1" min="50" max="200" value="130"><span class="slider-val" id="valL1">130px</span></label>
+  <label>摆长₂ <input type="range" id="sliderL2" min="50" max="200" value="120"><span class="slider-val" id="valL2">120px</span></label>
+  <label>重力 <input type="range" id="sliderG" min="100" max="3000" value="981" step="10"><span class="slider-val" id="valG">981</span></label>
+  <button id="btnReset">重置摆动</button>
+  <button id="btnClear">清空拖尾</button>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  const dispT1 = document.getElementById('dispT1');
+  const dispT2 = document.getElementById('dispT2');
+  const dispW1 = document.getElementById('dispW1');
+  const dispW2 = document.getElementById('dispW2');
+
+  const sliderL1 = document.getElementById('sliderL1');
+  const sliderL2 = document.getElementById('sliderL2');
+  const sliderG  = document.getElementById('sliderG');
+  const btnReset = document.getElementById('btnReset');
+  const btnClear = document.getElementById('btnClear');
+
+  const valL1 = document.getElementById('valL1');
+  const valL2 = document.getElementById('valL2');
+  const valG  = document.getElementById('valG');
+
+  let W, H, pivotX, pivotY;
+
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    pivotX = W / 2;
+    pivotY = H * 0.28;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // --- Physics parameters (matching reference) ---
+  const M1 = 10, M2 = 10;
+
+  let L1 = 130, L2 = 120;
+  let g  = 9.81 * 100; // scaled gravity for pixel-space physics
+
+  // State: [theta1, theta2, omega1, omega2] — same order as reference
+  let state = [Math.PI / 2, Math.PI / 2, 0, 0];
+
+  // Trail for bob 2
+  const trail = [];
+  const MAX_TRAIL = 300;
+
+  // Time
+  let lastTime = 0;
+
+  // --- Double pendulum derivatives (Lagrangian) ---
+  function getDerivatives(s) {
+    const t1 = s[0], t2 = s[1], w1 = s[2], w2 = s[3];
+    const delta = t1 - t2;
+
+    const den = 2 * M1 + M2 - M2 * Math.cos(2 * delta);
+
+    const num1 = -g * (2 * M1 + M2) * Math.sin(t1)
+      - M2 * g * Math.sin(t1 - 2 * t2)
+      - 2 * Math.sin(delta) * M2 * (w2 * w2 * L2 + w1 * w1 * L1 * Math.cos(delta));
+    const alpha1 = num1 / (L1 * den);
+
+    const num2 = 2 * Math.sin(delta) * (
+      w1 * w1 * L1 * (M1 + M2)
+      + g * (M1 + M2) * Math.cos(t1)
+      + w2 * w2 * L2 * M2 * Math.cos(delta)
+    );
+    const alpha2 = num2 / (L2 * den);
+
+    return [w1, w2, alpha1, alpha2];
+  }
+
+  // --- RK4 integrator ---
+  function rk4Step(s, dt) {
+    const k1 = getDerivatives(s);
+    const s2 = s.map((v, i) => v + k1[i] * dt * 0.5);
+    const k2 = getDerivatives(s2);
+    const s3 = s.map((v, i) => v + k2[i] * dt * 0.5);
+    const k3 = getDerivatives(s3);
+    const s4 = s.map((v, i) => v + k3[i] * dt);
+    const k4 = getDerivatives(s4);
+    return s.map((v, i) => v + (dt / 6) * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
+  }
+
+  // --- Bob positions ---
+  function getPositions() {
+    const x1 = pivotX + L1 * Math.sin(state[0]);
+    const y1 = pivotY + L1 * Math.cos(state[0]);
+    const x2 = x1 + L2 * Math.sin(state[1]);
+    const y2 = y1 + L2 * Math.cos(state[1]);
+    return { x1, y1, x2, y2 };
+  }
+
+  // --- Reset / Clear ---
+  function resetSystem() {
+    state = [Math.PI / 2, Math.PI / 2, 0, 0];
+    trail.length = 0;
+    syncSliders();
+  }
+
+  function clearTrail() {
+    trail.length = 0;
+  }
+
+  function syncSliders() {
+    L1 = +sliderL1.value;
+    L2 = +sliderL2.value;
+    g  = +sliderG.value;
+    valL1.textContent = L1 + 'px';
+    valL2.textContent = L2 + 'px';
+    valG.textContent  = g.toFixed(0);
+  }
+
+  sliderL1.addEventListener('input', () => { syncSliders(); trail.length = 0; });
+  sliderL2.addEventListener('input', () => { syncSliders(); trail.length = 0; });
+  sliderG.addEventListener('input', syncSliders);
+  btnReset.addEventListener('click', resetSystem);
+  btnClear.addEventListener('click', clearTrail);
+
+  // --- Mouse drag ---
+  let dragBob = 0;
+
+  function getMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    const m = getMousePos(e);
+    const pos = getPositions();
+    const d1 = Math.hypot(m.x - pos.x1, m.y - pos.y1);
+    const d2 = Math.hypot(m.x - pos.x2, m.y - pos.y2);
+    const HIT = 25;
+    if (d2 < HIT) {
+      dragBob = 2;
+    } else if (d1 < HIT) {
+      dragBob = 1;
+    }
+    if (dragBob) {
+      canvas.classList.add('dragging');
+      state[2] = 0;
+      state[3] = 0;
+    }
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!dragBob) return;
+    const m = getMousePos(e);
+    if (dragBob === 1) {
+      state[0] = Math.atan2(m.x - pivotX, m.y - pivotY);
+    } else {
+      const pos = getPositions();
+      state[1] = Math.atan2(m.x - pos.x1, m.y - pos.y1);
+    }
+    state[2] = 0;
+    state[3] = 0;
+    trail.length = 0;
+  });
+
+  canvas.addEventListener('mouseup', () => { dragBob = 0; canvas.classList.remove('dragging'); });
+  canvas.addEventListener('mouseleave', () => { dragBob = 0; canvas.classList.remove('dragging'); });
+
+  // Touch support
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: t.clientX, clientY: t.clientY }));
+  }, { passive: false });
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    canvas.dispatchEvent(new MouseEvent('mousemove', { clientX: t.clientX, clientY: t.clientY }));
+  }, { passive: false });
+  canvas.addEventListener('touchend', () => {
+    canvas.dispatchEvent(new MouseEvent('mouseup'));
+  });
+
+  // --- Drawing ---
+  function drawPivot(x, y) {
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+  }
+
+  function drawBob1(x, y) {
+    ctx.beginPath();
+    ctx.arc(x, y, 12, 0, Math.PI * 2);
+    ctx.fillStyle = '#ff4081';
+    ctx.shadowColor = '#ff4081';
+    ctx.shadowBlur = 14;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  function drawBob2(x, y) {
+    ctx.beginPath();
+    ctx.arc(x, y, 14, 0, Math.PI * 2);
+    ctx.fillStyle = '#00e5ff';
+    ctx.shadowColor = '#00e5ff';
+    ctx.shadowBlur = 18;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  function drawTrail(time) {
+    if (trail.length < 2) return;
+    for (let i = 1; i < trail.length; i++) {
+      const p0 = trail[i - 1];
+      const p1 = trail[i];
+      const progress = i / trail.length;
+      const hue = (i * 2 + time * 0.05) % 360;
+
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${progress * 0.8})`;
+      ctx.lineWidth = progress * 3;
+      ctx.shadowColor = `hsl(${hue}, 100%, 60%)`;
+      ctx.shadowBlur = 8;
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+  }
+
+  function updateDisplay() {
+    dispT1.textContent = (state[0] * 180 / Math.PI).toFixed(1) + '°';
+    dispT2.textContent = (state[1] * 180 / Math.PI).toFixed(1) + '°';
+    dispW1.textContent = state[2].toFixed(2) + ' rad/s';
+    dispW2.textContent = state[3].toFixed(2) + ' rad/s';
+  }
+
+  function animate(currentTime) {
+    requestAnimationFrame(animate);
+
+    if (!lastTime) { lastTime = currentTime; return; }
+    const dt = Math.min((currentTime - lastTime) / 1000, 0.03);
+    lastTime = currentTime;
+
+    // Variable timestep with substeps for precision (matching reference)
+    if (!dragBob) {
+      const subSteps = 8;
+      const subDt = dt / subSteps;
+      for (let i = 0; i < subSteps; i++) {
+        state = rk4Step(state, subDt);
+      }
+    }
+
+    const pos = getPositions();
+
+    // Record trail for bob 2
+    trail.push({ x: pos.x2, y: pos.y2 });
+    if (trail.length > MAX_TRAIL) trail.shift();
+
+    // === DRAW ===
+    ctx.clearRect(0, 0, W, H);
+
+    // Background radial gradient
+    const bgGrad = ctx.createRadialGradient(pivotX, pivotY + 80, 0, pivotX, pivotY + 80, Math.max(L1 + L2 + 100, 400));
+    bgGrad.addColorStop(0, '#1c1c28');
+    bgGrad.addColorStop(1, '#0d0d14');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    drawTrail(currentTime);
+
+    // Rods
+    ctx.beginPath();
+    ctx.moveTo(pivotX, pivotY);
+    ctx.lineTo(pos.x1, pos.y1);
+    ctx.lineTo(pos.x2, pos.y2);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    drawPivot(pivotX, pivotY);
+    drawBob1(pos.x1, pos.y1);
+    drawBob2(pos.x2, pos.y2);
+
+    updateDisplay();
+  }
+
+  syncSliders();
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>
